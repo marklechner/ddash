@@ -8,23 +8,11 @@ ddash run -- ./script.sh
 
 The script runs with **no network access**, **no access to your secrets**, and **can only write to the current directory**. Enforced at the kernel level via macOS sandbox-exec — the same mechanism used by Safari, Chrome, and other system apps.
 
-## Why ddash instead of Docker?
+## When to use ddash
 
-Docker runs **Linux containers**. If you download a macOS-native binary (a Mach-O arm64 executable), a Homebrew package, a Swift CLI, or a `.command` file — Docker can't run it. VMs are heavy and slow. ddash runs macOS-native software with constraints, instantly.
+ddash is for running **native macOS commands and binaries you don't fully trust**. Downloaded a CLI tool from GitHub? Running a third-party build script? Evaluating a vendor's binary? Prefix it with `ddash run` and it can't phone home or touch your secrets.
 
-The other case: you want to use **your actual local environment** but constrain it. `npm install` needs your local Node version. `pip install` needs your venv. An AI agent needs your actual project files. Docker requires volume mounts, image building, environment mirroring. ddash just works — same toolchain, same files, but the process can't reach beyond what you allow.
-
-**Use ddash when:**
-- You need to run a **macOS-native binary** you don't fully trust
-- You want to use your **local toolchain** (Node, Python, Go) but restrict what it can access
-- You need **instant startup** — no image pull, no container build, zero overhead
-- You're a security person triaging a downloaded tool on your Mac
-
-**Use Docker when:**
-- You need **full process isolation** (separate PID namespace, network namespace)
-- You need a **reproducible environment** (clean slate every time)
-- You're running **Linux software** or **server workloads**
-- You need to isolate **inter-process communication** (Mach IPC — see limitations)
+For full process isolation, reproducible environments, or Linux workloads — use containers. ddash is specifically for the case where you need to run something natively on your Mac but want guardrails.
 
 ## Install
 
@@ -46,6 +34,9 @@ ddash run -- python script.py
 
 # Allow network when you need it
 ddash run --allow-net -- npm install
+
+# Interactive per-domain network control (like Little Snitch)
+ddash run --net -- npm install
 
 # Full read-only — nothing gets written anywhere
 ddash run --deny-write -- ./suspicious-binary
@@ -87,6 +78,32 @@ ddash run --allow-net -- npm install
 ```
 
 The install works normally. But if a malicious postinstall script tries to `cat ~/.ssh/id_ed25519` or `curl` your env vars somewhere — blocked.
+
+### Interactive network control with `--net`
+
+You want network access but don't want to blanket-allow everything. Use `--net` for per-domain prompts — like Little Snitch for a single process:
+
+```bash
+ddash run --net -- python3 train.py
+```
+
+```
+ddash: sandboxing python3 (network=interactive, writes=allowed, env=scrubbed)
+
+ddash: python3 train.py wants to connect to api.openai.com
+       [a]llow  [d]eny  a[l]ways  [n]ever: l
+
+ddash: python3 train.py wants to connect to files.pythonhosted.org
+       [a]llow  [d]eny  a[l]ways  [n]ever: a
+
+ddash: saved 1 domain rule(s) to .ddash.json (api.openai.com: always)
+```
+
+- **allow/deny**: one-time decision for this run
+- **always/never**: persisted to `.ddash.json`, no prompt next time
+- Prompts via `/dev/tty` so piped stdin still works (`echo data | ddash run --net -- cmd`)
+- Works with any program that respects `HTTP_PROXY`/`HTTPS_PROXY` (most do)
+- Raw TCP/UDP bypassing the proxy is blocked at the kernel level
 
 ### AI coding agents
 
@@ -185,6 +202,8 @@ ddash is a practical security tool, not a security boundary against a sophistica
 
 **Env scrubbing is pattern-based.** ddash strips known patterns (`AWS_*`, `*_TOKEN`, `*_SECRET`, etc.) but won't catch secrets in non-standard variable names like `MY_DB=postgres://user:pass@host`. Use `--deny-write --deny-net` (no network + no writes) as the strongest defense against exfiltration regardless of env vars.
 
+**`--net` only intercepts HTTP/HTTPS.** The interactive proxy works by setting `HTTP_PROXY`/`HTTPS_PROXY` env vars. Programs that don't respect proxy settings, or that use raw TCP/UDP, will be blocked at the sandbox level (no prompt, just denied). Most package managers, HTTP clients, and language runtimes respect proxy env vars.
+
 **`ddash trace` is experimental.** Trace mode runs commands permissively and tries to log access patterns, but sandbox-exec trace output goes to syslog rather than being directly capturable. The suggested policies are best-effort, not comprehensive. Verify them manually.
 
 **Not a container.** ddash is syscall-level access control, not process isolation. There's no separate PID namespace, no filesystem layering, no network namespace. The sandboxed process runs as your user on your machine — it just can't do everything your user can.
@@ -222,12 +241,13 @@ A `.ddash.json` defines a per-project sandbox policy. When present, `ddash run` 
 | `allow_net` | `[]` = deny all. `["*"]` = allow all. Or list specific hosts. |
 | `allow_read` | Filesystem read paths beyond system defaults. |
 | `allow_write` | Filesystem write paths. `[]` = fully read-only. |
+| `network_domains` | Cached per-domain decisions from `--net` mode. `"always"` or `"never"`. |
 
 ### Default policy
 
 | Resource | Default | Override |
 |----------|---------|---------|
-| Network | **Denied** | `--allow-net` or config |
+| Network | **Denied** | `--allow-net` or `--net` (interactive) or config |
 | Filesystem reads | System paths + cwd | Config |
 | Filesystem writes | cwd + `/tmp` | `--deny-write` for none |
 | Environment variables | **Sensitive vars scrubbed** | `--pass-env` to allow all |
@@ -257,7 +277,8 @@ ddash version                  Print version
 
 | Flag | Description |
 |------|-------------|
-| `--allow-net` | Allow network access |
+| `--allow-net` | Allow all network access |
+| `--net` | Interactive per-domain network prompts |
 | `--deny-write` | Deny all filesystem writes |
 | `--pass-env` | Pass all environment variables (skip scrubbing) |
 | `--profile` | Print the sandbox profile without running |

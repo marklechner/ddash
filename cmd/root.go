@@ -22,6 +22,7 @@ Usage:
 Examples:
   ddash run -- ./untrusted.sh             No network, env scrubbed, writes to cwd
   ddash run --allow-net -- npm install     Allow network access
+  ddash run --net -- npm install           Per-domain network prompts
   ddash run --deny-write -- ./binary       Full read-only mode
   ddash run --pass-env -- ./needs-creds    Pass env vars through
   ddash trace -- python train.py           Trace access, suggest policy

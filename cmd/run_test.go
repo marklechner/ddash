@@ -101,7 +101,7 @@ func TestGenerateProfileDefaults(t *testing.T) {
 		AllowWrite: []string{"."},
 	}
 
-	profile := generateProfile(cfg, false)
+	profile := generateProfile(cfg, false, false)
 
 	// Must have deny default
 	if !strings.Contains(profile, "(deny default)") {
@@ -138,7 +138,7 @@ func TestGenerateProfileAllowNet(t *testing.T) {
 		AllowWrite: []string{"."},
 	}
 
-	profile := generateProfile(cfg, false)
+	profile := generateProfile(cfg, false, false)
 
 	if !strings.Contains(profile, "(allow network*)") {
 		t.Error("profile should allow network when configured")
@@ -152,7 +152,7 @@ func TestGenerateProfileDenyWrite(t *testing.T) {
 		AllowWrite: []string{},
 	}
 
-	profile := generateProfile(cfg, true)
+	profile := generateProfile(cfg, true, false)
 
 	// Should NOT have /private/tmp write access
 	if strings.Contains(profile, "(allow file-write* (subpath \"/private/tmp\"))") {

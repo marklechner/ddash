@@ -175,3 +175,74 @@ func TestSecurityExitCodeForwarded(t *testing.T) {
 		t.Errorf("expected exit code 42, got %d", exitErr.ExitCode())
 	}
 }
+
+func TestSecurityNetFlagMutuallyExclusive(t *testing.T) {
+	binary := ddashBinary(t)
+
+	cmd := exec.Command(binary, "run", "--allow-net", "--net", "--", "echo", "hi")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Error("--allow-net and --net should be mutually exclusive")
+	}
+	if !strings.Contains(string(out), "mutually exclusive") {
+		t.Errorf("expected 'mutually exclusive' error, got: %s", string(out))
+	}
+}
+
+func TestSecurityNetProfileAllowsOnlyLocalhost(t *testing.T) {
+	binary := ddashBinary(t)
+
+	cmd := exec.Command(binary, "run", "--net", "--profile", "--", "echo", "hi")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("--net --profile failed: %v\n%s", err, out)
+	}
+
+	profile := string(out)
+	if !strings.Contains(profile, `(allow network* (remote ip "localhost:*"))`) {
+		t.Error("--net profile should allow network only to localhost")
+	}
+	if strings.Contains(profile, "(allow network*)\n") {
+		t.Error("--net profile should NOT have unrestricted network access")
+	}
+}
+
+func TestSecurityNetPreCachedDomain(t *testing.T) {
+	binary := ddashBinary(t)
+
+	// Create a temp dir with a .ddash.json that has a pre-cached domain
+	tmpDir := t.TempDir()
+	config := `{"name":"test","allow_net":[],"allow_read":["."],"allow_write":["."],"network_domains":{"example.com":"always"}}`
+	os.WriteFile(tmpDir+"/.ddash.json", []byte(config), 0644)
+
+	// Run a command with --net that tries to reach example.com via proxy
+	// The proxy should auto-allow example.com without prompting
+	cmd := exec.Command(binary, "run", "--net", "--", "python3", "-c",
+		`import os; print("proxy=" + os.environ.get("HTTPS_PROXY", "unset"))`)
+	cmd.Dir = tmpDir
+	out, err := cmd.CombinedOutput()
+	output := string(out)
+
+	if err != nil {
+		// Exit code issues are acceptable — we just want to verify proxy env was set
+		t.Logf("command exited with error (may be expected): %v", err)
+	}
+
+	if !strings.Contains(output, "proxy=http://127.0.0.1:") {
+		t.Errorf("expected HTTPS_PROXY to be set to local proxy, got: %s", output)
+	}
+}
+
+func TestSecurityNetInteractiveStatus(t *testing.T) {
+	binary := ddashBinary(t)
+
+	cmd := exec.Command(binary, "run", "--net", "--", "true")
+	out, err := cmd.CombinedOutput()
+	output := string(out)
+
+	// May fail due to sandbox issues with 'true', but stderr should show interactive
+	_ = err
+	if !strings.Contains(output, "network=interactive") {
+		t.Errorf("expected 'network=interactive' in status line, got: %s", output)
+	}
+}

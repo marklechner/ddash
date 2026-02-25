@@ -29,13 +29,14 @@ Flags:
 
 // SandboxConfig represents a sandbox configuration file.
 type SandboxConfig struct {
-	Name      string   `json:"name"`
-	Version   string   `json:"version"`
-	CreatedAt string   `json:"created_at"`
-	Isolation string   `json:"isolation"`
-	AllowNet   []string `json:"allow_net"`
-	AllowRead  []string `json:"allow_read"`
-	AllowWrite []string `json:"allow_write"`
+	Name           string            `json:"name"`
+	Version        string            `json:"version"`
+	CreatedAt      string            `json:"created_at"`
+	Isolation      string            `json:"isolation"`
+	AllowNet       []string          `json:"allow_net"`
+	AllowRead      []string          `json:"allow_read"`
+	AllowWrite     []string          `json:"allow_write"`
+	NetworkDomains map[string]string `json:"network_domains,omitempty"`
 }
 
 func sandboxCmd() error {
