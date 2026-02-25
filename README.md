@@ -6,11 +6,25 @@ Lightweight process sandboxing for macOS. One command, zero setup.
 ddash run -- ./script.sh
 ```
 
-The script runs with **no network access**, **no access to your secrets**, and **can only write to the current directory**. Everything else is denied at the kernel level.
+The script runs with **no network access**, **no access to your secrets**, and **can only write to the current directory**. Enforced at the kernel level via macOS sandbox-exec — the same mechanism used by Safari, Chrome, and other system apps.
 
-## Why?
+## Why ddash instead of Docker?
 
-macOS ships with a powerful process sandboxing engine, but using it requires writing Scheme-based policy files by hand. Nobody does this. ddash makes it a one-liner.
+Docker runs **Linux containers**. If you download a macOS-native binary (a Mach-O arm64 executable), a Homebrew package, a Swift CLI, or a `.command` file — Docker can't run it. VMs are heavy and slow. ddash runs macOS-native software with constraints, instantly.
+
+The other case: you want to use **your actual local environment** but constrain it. `npm install` needs your local Node version. `pip install` needs your venv. An AI agent needs your actual project files. Docker requires volume mounts, image building, environment mirroring. ddash just works — same toolchain, same files, but the process can't reach beyond what you allow.
+
+**Use ddash when:**
+- You need to run a **macOS-native binary** you don't fully trust
+- You want to use your **local toolchain** (Node, Python, Go) but restrict what it can access
+- You need **instant startup** — no image pull, no container build, zero overhead
+- You're a security person triaging a downloaded tool on your Mac
+
+**Use Docker when:**
+- You need **full process isolation** (separate PID namespace, network namespace)
+- You need a **reproducible environment** (clean slate every time)
+- You're running **Linux software** or **server workloads**
+- You need to isolate **inter-process communication** (Mach IPC — see limitations)
 
 ## Install
 
@@ -39,18 +53,44 @@ ddash run --deny-write -- ./suspicious-binary
 # Pass env vars through when the command needs credentials
 ddash run --allow-net --pass-env -- ./deploy.sh
 
-# Not sure what a script needs? Trace it first
-ddash trace -- python train.py
-
 # Set up a per-project policy interactively
 ddash sandbox init -i
 ```
 
-## Practical examples
+## Real-world scenarios
 
-### Sandbox an AI coding agent
+### Security triage: downloaded binary from the internet
 
-Let an agent read and modify your project, but prevent it from accessing your SSH keys, cloud credentials, or phoning home:
+You find a tool on GitHub. It's a compiled macOS binary. You want to run it but don't know what it does.
+
+```bash
+# Run it read-only, no network — see what happens
+ddash run --deny-write -- ./sketchy-tool --help
+
+# If it needs to write output, allow cwd only
+ddash run -- ./sketchy-tool export --output results.csv
+
+# If it needs network, allow it but block filesystem escape
+ddash run --allow-net -- ./recon-tool scan target.com
+```
+
+In Docker, this binary **wouldn't run at all** (wrong platform). In a VM, you'd need minutes of setup. With ddash, it takes one command and the binary runs natively on your Mac with constraints.
+
+### Supply chain risk: npm/pip install
+
+Package managers execute arbitrary code during install (postinstall scripts, setup.py). A compromised package could read your SSH keys and send them to an attacker.
+
+```bash
+# Network allowed (needs to download), but can only write to project dir
+# Env scrubbed so postinstall scripts can't read GITHUB_TOKEN, AWS keys, etc.
+ddash run --allow-net -- npm install
+```
+
+The install works normally. But if a malicious postinstall script tries to `cat ~/.ssh/id_ed25519` or `curl` your env vars somewhere — blocked.
+
+### AI coding agents
+
+Let an agent modify your project without giving it the keys to everything:
 
 ```json
 {
@@ -65,11 +105,11 @@ Let an agent read and modify your project, but prevent it from accessing your SS
 ddash run -- aider --model claude-3.5-sonnet
 ```
 
-The agent can read and edit code in the current directory. It cannot reach the internet, read `~/.ssh`, `~/.aws`, or `~/.config`, or write outside the project.
+The agent reads and edits code in the current directory. It cannot reach the internet, read `~/.ssh`, `~/.aws`, `~/.config`, or write outside the project. Env vars like `OPENAI_API_KEY` are scrubbed unless you pass `--pass-env`.
 
-### Sandbox a build system
+### Sandboxed build systems
 
-Allow `make` to build your project and write to a build dir, but block network access so the build can't exfiltrate source code or secrets:
+Allow `make` to build but block network exfiltration of source code:
 
 ```json
 {
@@ -84,43 +124,30 @@ Allow `make` to build your project and write to a build dir, but block network a
 ddash run -- make -j8
 ```
 
-### Install packages with network, but no filesystem escape
+### Vendor CLI evaluation
 
-Let npm/pip download packages but only write to the project directory:
-
-```json
-{
-  "name": "package-install",
-  "allow_net": ["*"],
-  "allow_read": ["."],
-  "allow_write": ["."]
-}
-```
+Security team evaluating a new SaaS vendor's CLI tool before approving it:
 
 ```bash
-ddash run -- npm install
-ddash run -- pip install -r requirements.txt --target ./vendor
+# Step 1: Run it read-only, no network — see what it tries to access
+ddash run --deny-write -- ./vendor-cli --help
+
+# Step 2: Run with controlled access
+ddash run -- ./vendor-cli export --format csv
+
+# Step 3: If satisfied, create a permanent policy
+ddash sandbox init -i
 ```
 
-### Run untrusted scripts read-only
+### Data pipeline with controlled output
 
-Inspect a downloaded script without letting it modify anything:
-
-```bash
-ddash run --deny-write -- bash setup.sh --dry-run
-```
-
-No config file needed — the `--deny-write` flag creates a fully read-only sandbox on the fly.
-
-### Data analysis with controlled output
-
-Let a data pipeline read input files and write results, but block network access to prevent data exfiltration:
+Read data, write results, no network — prevents data exfiltration:
 
 ```json
 {
   "name": "data-pipeline",
   "allow_net": [],
-  "allow_read": [".", "./data", "/datasets"],
+  "allow_read": [".", "./data"],
   "allow_write": ["./output"]
 }
 ```
@@ -129,50 +156,54 @@ Let a data pipeline read input files and write results, but block network access
 ddash run -- python pipeline.py --input ./data --output ./output
 ```
 
-### Audit a third-party CLI tool
+## What ddash protects against (tested)
 
-Not sure what a binary does? Trace it first, then sandbox it:
+Every release is verified against these attack scenarios with [integration tests](cmd/security_test.go):
 
-```bash
-# Step 1: See what it tries to access
-ddash trace -- ./vendor-tool export --format csv
+| Attack | Result |
+|--------|--------|
+| Script reads `~/.ssh/` private keys | **Blocked** — `Operation not permitted` |
+| Script reads `~/.aws/credentials` | **Blocked** — path outside sandbox |
+| Script opens outbound network connection | **Blocked** — DNS and TCP denied |
+| Script writes to home directory (`~/`) | **Blocked** — write restricted to cwd |
+| Script writes to arbitrary path (`/etc`, `/var`) | **Blocked** — write restricted to cwd |
+| Subprocess tries to escape (e.g., `cat ~/.ssh/id_ed25519`) | **Blocked** — child processes inherit sandbox |
+| Shell redirect escape (`sh -c 'echo x > ~/file'`) | **Blocked** — kernel-level, applies to all children |
+| Script reads `GITHUB_TOKEN` from environment | **Scrubbed** — removed before exec |
+| Script reads `AWS_SECRET_ACCESS_KEY` from env | **Scrubbed** — removed before exec |
+| `--deny-write` bypass via `/tmp` | **Blocked** — deny-write blocks all paths |
 
-# Step 2: Review the suggested policy, save it
-# Step 3: Run sandboxed
-ddash run -- ./vendor-tool export --format csv
-```
+## Known limitations
 
-## Discover what a program needs (`trace`)
+ddash is a practical security tool, not a security boundary against a sophisticated attacker. Be aware of what it does and doesn't do.
 
-Run any command in trace mode — ddash monitors what it accesses and suggests a minimal policy:
+**Mach IPC is open.** The sandbox allows `mach-lookup`, which means sandboxed processes can communicate with system services (clipboard/pasteboard, potentially Keychain). Restricting this breaks most programs, so it's allowed by default. A determined attacker could use Mach IPC for cross-process communication.
 
-```bash
-ddash trace -- python train.py
-```
+**File metadata is visible.** Sandboxed processes can see that files *exist* everywhere on disk (`file-read-metadata` is allowed), they just can't read contents outside allowed paths. A process can enumerate filenames in `~/.ssh/` even though it can't read the keys.
 
-```
-Tracing python train.py...
+**Process enumeration is possible.** Sandboxed processes can list running processes and PIDs (`process-info*` is allowed). This leaks information about what's running on the machine.
 
-Access summary:
-  Network:    5 outbound connections (api.openai.com, pypi.org, ...)
-  File reads: 142 (system: 98, project: 44)
-  File writes: 3 (/tmp/cache.db, ./output.csv, ./model.pt)
+**Env scrubbing is pattern-based.** ddash strips known patterns (`AWS_*`, `*_TOKEN`, `*_SECRET`, etc.) but won't catch secrets in non-standard variable names like `MY_DB=postgres://user:pass@host`. Use `--deny-write --deny-net` (no network + no writes) as the strongest defense against exfiltration regardless of env vars.
 
-Suggested .ddash.json:
-  allow_net:   ["api.openai.com"]
-  allow_read:  ["."]
-  allow_write: [".", "/tmp"]
+**`ddash trace` is experimental.** Trace mode runs commands permissively and tries to log access patterns, but sandbox-exec trace output goes to syslog rather than being directly capturable. The suggested policies are best-effort, not comprehensive. Verify them manually.
 
-Save this config? [Y/n]
-```
+**Not a container.** ddash is syscall-level access control, not process isolation. There's no separate PID namespace, no filesystem layering, no network namespace. The sandboxed process runs as your user on your machine — it just can't do everything your user can.
 
-## Interactive policy setup
+**Detection is possible.** A sandboxed process can detect it's running under sandbox-exec and could behave differently (appear benign when sandboxed, act malicious when not).
+
+## How it works
+
+ddash generates macOS [Sandbox Profiles](https://reverse.put.as/wp-content/uploads/2011/09/Apple-Sandbox-Guide-v1.0.pdf) (SBPL) and runs commands through `sandbox-exec`. This is the same kernel-level Mandatory Access Control used by Safari, Chrome, Mail, and other macOS apps. Enforcement happens in the XNU kernel at the syscall level — there is no userspace bypass. Near-zero overhead, no containers, no filesystem layers.
+
+Use `ddash run --profile -- <cmd>` to inspect the exact profile that will be applied.
+
+## Configuration
+
+### Interactive setup
 
 ```bash
 ddash sandbox init -i
 ```
-
-Walks you through building a `.ddash.json` step by step:
 
 ```
 Project name [my-project]:
@@ -182,17 +213,17 @@ Allow network access? [y/N]: y
 Allow writes outside current directory? [y/N]: n
 ```
 
-## Configuration reference
+### Config reference
 
-A `.ddash.json` file defines a persistent sandbox policy per project. When present, `ddash run` applies it automatically.
+A `.ddash.json` defines a per-project sandbox policy. When present, `ddash run` applies it automatically.
 
 | Field | Description |
 |-------|-------------|
-| `allow_net` | `[]` = deny all network. `["*"]` = allow all. Or list specific hosts. |
+| `allow_net` | `[]` = deny all. `["*"]` = allow all. Or list specific hosts. |
 | `allow_read` | Filesystem read paths beyond system defaults. |
 | `allow_write` | Filesystem write paths. `[]` = fully read-only. |
 
-## Default security policy
+### Default policy
 
 | Resource | Default | Override |
 |----------|---------|---------|
@@ -202,48 +233,20 @@ A `.ddash.json` file defines a persistent sandbox policy per project. When prese
 | Environment variables | **Sensitive vars scrubbed** | `--pass-env` to allow all |
 | Process execution | Allowed | — |
 
-System paths (`/bin`, `/usr`, `/System`, `/Library`, `/opt/homebrew`) are always readable so programs can find interpreters and shared libraries.
-
 ### Environment scrubbing
 
-By default, ddash strips environment variables that match known secret patterns before passing them to the sandboxed process. This prevents credential leakage even if a script reads `os.environ`.
+By default, ddash strips env vars matching known secret patterns before exec. Scrubbed patterns:
 
-Scrubbed patterns include:
-- Cloud credentials: `AWS_*`, `AZURE_*`, `GCP_*`, `GOOGLE_*`
-- API tokens: `GITHUB_TOKEN`, `GH_TOKEN`, `GITLAB_*`, `NPM_TOKEN`, `OPENAI_API*`, `ANTHROPIC_API*`, `HF_TOKEN`
-- Infrastructure: `DATABASE_URL`, `REDIS_URL`, `DOCKER_*`, `SENTRY_*`, `DATADOG_*`
+- Cloud: `AWS_*`, `AZURE_*`, `GCP_*`, `GOOGLE_*`
+- Tokens: `GITHUB_TOKEN`, `GH_TOKEN`, `GITLAB_*`, `NPM_TOKEN`, `OPENAI_API*`, `ANTHROPIC_API*`, `HF_TOKEN`
+- Infra: `DATABASE_URL`, `REDIS_URL`, `DOCKER_*`, `SENTRY_*`, `DATADOG_*`
 - Any variable containing `_SECRET`, `_TOKEN`, `_KEY`, `_PASSWORD`, `_CREDENTIAL`, or `_AUTH`
-
-Use `--pass-env` when the sandboxed command legitimately needs credentials (e.g., an API client with network access).
-
-## What ddash protects against (tested)
-
-Every release is verified against these attack scenarios:
-
-| Attack | Result |
-|--------|--------|
-| Script reads `~/.ssh/` private keys | **Blocked** — `Operation not permitted` |
-| Script reads `~/.aws/credentials` | **Blocked** — path outside sandbox |
-| Script opens outbound network connection | **Blocked** — DNS and TCP denied |
-| Script writes to home directory (`~/`) | **Blocked** — write restricted to cwd |
-| Script writes to arbitrary path (`/etc`, `/var`) | **Blocked** — write restricted to cwd |
-| Subprocess tries to escape sandbox (e.g., `cat ~/.ssh/id_ed25519`) | **Blocked** — child processes inherit sandbox |
-| Shell redirect escape (`sh -c 'echo x > ~/file'`) | **Blocked** — sandbox is kernel-level, applies to all children |
-| Script reads `GITHUB_TOKEN` from environment | **Scrubbed** — variable removed before exec |
-| Script reads `AWS_SECRET_ACCESS_KEY` from env | **Scrubbed** — variable removed before exec |
-| `--deny-write` bypass via `/tmp` | **Blocked** — deny-write blocks all paths including `/tmp` |
-
-## How it works
-
-ddash generates macOS [Sandbox Profiles](https://reverse.put.as/wp-content/uploads/2011/09/Apple-Sandbox-Guide-v1.0.pdf) (SBPL) and runs commands through `sandbox-exec`. This is the same kernel-level sandboxing used by Safari, Mail, and other system apps. It operates at the syscall level — near-zero overhead, no containers, no filesystem layers.
-
-Use `ddash run --profile -- <cmd>` to inspect the exact profile that will be applied.
 
 ## All commands
 
 ```
 ddash run [flags] -- <cmd>     Run a command in a sandbox
-ddash trace -- <cmd>           Trace access and suggest policy
+ddash trace -- <cmd>           Trace access and suggest policy (experimental)
 ddash sandbox init [-i]        Create config (interactive with -i)
 ddash sandbox list             Show current config
 ddash sandbox status           Check sandbox status

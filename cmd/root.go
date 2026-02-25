@@ -15,7 +15,7 @@ Uses the native macOS sandbox engine (sandbox-exec) at the kernel level.
 
 Usage:
   ddash run [flags] -- <command>    Run a command in a sandbox
-  ddash trace -- <command>          Trace access and suggest policy
+  ddash trace -- <command>          Trace access, suggest policy (experimental)
   ddash sandbox <subcommand>        Manage sandbox configuration
   ddash version                     Print version
 
