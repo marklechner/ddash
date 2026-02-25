@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -18,7 +20,7 @@ Usage:
   ddash sandbox <command> [flags]
 
 Commands:
-  init        Create a .ddash.json in the current directory
+  init        Create a .ddash.json (use -i for interactive setup)
   list        Show current sandbox configuration
   status      Check if a sandbox config exists
 
@@ -64,19 +66,32 @@ func configPath() string {
 }
 
 func sandboxInit() error {
-	path := configPath()
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("sandbox config already exists at %s", path)
+	interactive := false
+	for _, arg := range os.Args[3:] {
+		if arg == "-i" || arg == "--interactive" {
+			interactive = true
+		}
 	}
 
-	cfg := SandboxConfig{
-		Name:      filepath.Base(mustGetwd()),
-		Version:   Version,
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-		Isolation: "process",
-		AllowNet:   []string{},
-		AllowRead:  []string{"."},
-		AllowWrite: []string{"."},
+	path := configPath()
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("sandbox config already exists at %s (delete it first or edit manually)", path)
+	}
+
+	var cfg SandboxConfig
+
+	if interactive {
+		cfg = interactiveInit()
+	} else {
+		cfg = SandboxConfig{
+			Name:       filepath.Base(mustGetwd()),
+			Version:    Version,
+			CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+			Isolation:  "process",
+			AllowNet:   []string{},
+			AllowRead:  []string{"."},
+			AllowWrite: []string{"."},
+		}
 	}
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -90,6 +105,85 @@ func sandboxInit() error {
 
 	fmt.Printf("Initialized sandbox config at %s\n", path)
 	return nil
+}
+
+func interactiveInit() SandboxConfig {
+	reader := bufio.NewReader(os.Stdin)
+
+	defaultName := filepath.Base(mustGetwd())
+	fmt.Printf("Project name [%s]: ", defaultName)
+	name := readLine(reader)
+	if name == "" {
+		name = defaultName
+	}
+
+	// Network
+	fmt.Print("Allow network access? [y/N]: ")
+	allowNet := []string{}
+	if yesNo(reader) {
+		fmt.Print("  Allow all hosts or specific ones? [all/specific]: ")
+		answer := strings.ToLower(readLine(reader))
+		if answer == "specific" {
+			fmt.Print("  Hosts (comma-separated): ")
+			hostsStr := readLine(reader)
+			for _, h := range strings.Split(hostsStr, ",") {
+				h = strings.TrimSpace(h)
+				if h != "" {
+					allowNet = append(allowNet, h)
+				}
+			}
+		} else {
+			allowNet = []string{"*"}
+		}
+	}
+
+	// Write access
+	allowWrite := []string{"."}
+	fmt.Print("Allow writes outside current directory? [y/N]: ")
+	if yesNo(reader) {
+		fmt.Print("  Additional write paths (comma-separated): ")
+		pathsStr := readLine(reader)
+		for _, p := range strings.Split(pathsStr, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				allowWrite = append(allowWrite, p)
+			}
+		}
+	}
+
+	// Read access
+	allowRead := []string{"."}
+	fmt.Print("Allow reads outside current directory and system paths? [y/N]: ")
+	if yesNo(reader) {
+		fmt.Print("  Additional read paths (comma-separated): ")
+		pathsStr := readLine(reader)
+		for _, p := range strings.Split(pathsStr, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				allowRead = append(allowRead, p)
+			}
+		}
+	}
+
+	return SandboxConfig{
+		Name:       name,
+		Version:    Version,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		Isolation:  "process",
+		AllowNet:   allowNet,
+		AllowRead:  allowRead,
+		AllowWrite: allowWrite,
+	}
+}
+
+func readLine(reader *bufio.Reader) string {
+	line, _ := reader.ReadString('\n')
+	return strings.TrimSpace(line)
+}
+
+func yesNo(reader *bufio.Reader) bool {
+	answer := strings.ToLower(readLine(reader))
+	return answer == "y" || answer == "yes"
 }
 
 func sandboxList() error {

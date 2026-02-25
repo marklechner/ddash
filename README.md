@@ -1,23 +1,16 @@
 # ddash
 
-One command to sandbox anything on macOS. No Docker. No VMs. No dependencies.
+Lightweight process sandboxing for macOS. One command, zero setup.
 
 ```bash
-ddash run -- ./untrusted-script.sh
+ddash run -- ./script.sh
 ```
 
-That's it. The script runs with **no network access** and **can only write to the current directory**. Everything else is denied by default.
+The script runs with **no network access** and **can only write to the current directory**. Everything else is denied at the kernel level.
 
 ## Why?
 
-macOS has a powerful built-in sandboxing engine that almost nobody uses because it requires writing Scheme-based policy files by hand. ddash generates these profiles for you and makes sandboxing as simple as prefixing a command.
-
-**Use cases:**
-- Run downloaded scripts without worrying what they do
-- Execute build tools without letting them phone home
-- Test CLI tools in a restricted environment
-- Prevent rogue processes from reading your SSH keys or browser data
-- Audit what filesystem/network access a program actually needs
+macOS ships with a powerful process sandboxing engine, but using it requires writing Scheme-based policy files by hand. Nobody does this. ddash makes it a one-liner.
 
 ## Install
 
@@ -31,85 +24,197 @@ Or from source:
 go install github.com/marklechner/ddash@latest
 ```
 
-## Usage
-
-### Sandbox a command (default: no network, writes restricted to cwd)
+## Quick start
 
 ```bash
+# Run anything sandboxed — network blocked, writes restricted to cwd
 ddash run -- python script.py
-ddash run -- node build.js
-ddash run -- ./configure && make
-```
 
-### Allow network access
-
-```bash
+# Allow network when you need it
 ddash run --allow-net -- npm install
-ddash run --allow-net -- curl https://api.example.com
-```
 
-### Read-only mode (deny all writes)
-
-```bash
+# Full read-only — nothing gets written anywhere
 ddash run --deny-write -- ./suspicious-binary
-ddash run --deny-write -- python analyze.py
+
+# Not sure what a script needs? Trace it first
+ddash trace -- python train.py
+
+# Set up a per-project policy interactively
+ddash sandbox init -i
 ```
 
-### Inspect the generated sandbox profile
+## Practical examples
 
-```bash
-ddash run --profile -- python script.py
-```
+### Sandbox an AI coding agent
 
-This prints the raw macOS sandbox profile (SBPL) that would be applied — useful for auditing or customizing.
-
-## Per-project configuration
-
-Create a `.ddash.json` to define a persistent sandbox policy for a project:
-
-```bash
-ddash sandbox init
-```
+Let an agent read and modify your project, but prevent it from accessing your SSH keys, cloud credentials, or phoning home:
 
 ```json
 {
-  "name": "my-project",
-  "isolation": "process",
+  "name": "coding-agent",
   "allow_net": [],
   "allow_read": ["."],
   "allow_write": ["."]
 }
 ```
 
+```bash
+ddash run -- aider --model claude-3.5-sonnet
+```
+
+The agent can read and edit code in the current directory. It cannot reach the internet, read `~/.ssh`, `~/.aws`, or `~/.config`, or write outside the project.
+
+### Sandbox a build system
+
+Allow `make` to build your project and write to a build dir, but block network access so the build can't exfiltrate source code or secrets:
+
+```json
+{
+  "name": "secure-build",
+  "allow_net": [],
+  "allow_read": [".", "/opt/homebrew"],
+  "allow_write": [".", "./build", "/tmp"]
+}
+```
+
+```bash
+ddash run -- make -j8
+```
+
+### Install packages with network, but no filesystem escape
+
+Let npm/pip download packages but only write to the project directory:
+
+```json
+{
+  "name": "package-install",
+  "allow_net": ["*"],
+  "allow_read": ["."],
+  "allow_write": ["."]
+}
+```
+
+```bash
+ddash run -- npm install
+ddash run -- pip install -r requirements.txt --target ./vendor
+```
+
+### Run untrusted scripts read-only
+
+Inspect a downloaded script without letting it modify anything:
+
+```bash
+ddash run --deny-write -- bash setup.sh --dry-run
+```
+
+No config file needed — the `--deny-write` flag creates a fully read-only sandbox on the fly.
+
+### Data analysis with controlled output
+
+Let a data pipeline read input files and write results, but block network access to prevent data exfiltration:
+
+```json
+{
+  "name": "data-pipeline",
+  "allow_net": [],
+  "allow_read": [".", "./data", "/datasets"],
+  "allow_write": ["./output"]
+}
+```
+
+```bash
+ddash run -- python pipeline.py --input ./data --output ./output
+```
+
+### Audit a third-party CLI tool
+
+Not sure what a binary does? Trace it first, then sandbox it:
+
+```bash
+# Step 1: See what it tries to access
+ddash trace -- ./vendor-tool export --format csv
+
+# Step 2: Review the suggested policy, save it
+# Step 3: Run sandboxed
+ddash run -- ./vendor-tool export --format csv
+```
+
+## Discover what a program needs (`trace`)
+
+Run any command in trace mode — ddash monitors what it accesses and suggests a minimal policy:
+
+```bash
+ddash trace -- python train.py
+```
+
+```
+Tracing python train.py...
+
+Access summary:
+  Network:    5 outbound connections (api.openai.com, pypi.org, ...)
+  File reads: 142 (system: 98, project: 44)
+  File writes: 3 (/tmp/cache.db, ./output.csv, ./model.pt)
+
+Suggested .ddash.json:
+  allow_net:   ["api.openai.com"]
+  allow_read:  ["."]
+  allow_write: [".", "/tmp"]
+
+Save this config? [Y/n]
+```
+
+## Interactive policy setup
+
+```bash
+ddash sandbox init -i
+```
+
+Walks you through building a `.ddash.json` step by step:
+
+```
+Project name [my-project]:
+Allow network access? [y/N]: y
+  Allow all hosts or specific ones? [all/specific]: specific
+  Hosts (comma-separated): api.example.com, cdn.example.com
+Allow writes outside current directory? [y/N]: n
+```
+
+## Configuration reference
+
+A `.ddash.json` file defines a persistent sandbox policy per project. When present, `ddash run` applies it automatically.
+
 | Field | Description |
 |-------|-------------|
-| `allow_net` | Network rules. `[]` = no network. `["*"]` = allow all. |
+| `allow_net` | `[]` = deny all network. `["*"]` = allow all. Or list specific hosts. |
 | `allow_read` | Filesystem read paths beyond system defaults. |
 | `allow_write` | Filesystem write paths. `[]` = fully read-only. |
 
 ## Default security policy
 
-| Resource | Default | Flag to override |
-|----------|---------|-----------------|
-| Network | **Denied** | `--allow-net` |
-| Filesystem reads | System paths + cwd | Via `.ddash.json` |
+| Resource | Default | Override |
+|----------|---------|---------|
+| Network | **Denied** | `--allow-net` or config |
+| Filesystem reads | System paths + cwd | Config |
 | Filesystem writes | cwd + `/tmp` | `--deny-write` for none |
 | Process execution | Allowed | — |
 
-System paths (`/bin`, `/usr`, `/System`, `/Library`, `/opt/homebrew`) are always readable so sandboxed programs can find their interpreters and libraries.
+System paths (`/bin`, `/usr`, `/System`, `/Library`, `/opt/homebrew`) are always readable so programs can find interpreters and shared libraries.
 
 ## How it works
 
-ddash generates a macOS [Sandbox Profile](https://reverse.put.as/wp-content/uploads/2011/09/Apple-Sandbox-Guide-v1.0.pdf) (SBPL) and executes your command through `sandbox-exec`. This is the same kernel-level sandboxing mechanism used by Safari, Mail, and other macOS system apps. It operates at the syscall level — there's no container overhead, no filesystem layering, and no virtualization.
+ddash generates macOS [Sandbox Profiles](https://reverse.put.as/wp-content/uploads/2011/09/Apple-Sandbox-Guide-v1.0.pdf) (SBPL) and runs commands through `sandbox-exec`. This is the same kernel-level sandboxing used by Safari, Mail, and other system apps. It operates at the syscall level — near-zero overhead, no containers, no filesystem layers.
 
-## Commands
+Use `ddash run --profile -- <cmd>` to inspect the exact profile that will be applied.
+
+## All commands
 
 ```
-ddash run [flags] -- <command>    Run a command in a sandbox
-ddash sandbox init                Create .ddash.json config
-ddash sandbox list                Show current config
-ddash sandbox status              Check sandbox status
-ddash version                     Print version
+ddash run [flags] -- <cmd>     Run a command in a sandbox
+ddash trace -- <cmd>           Trace access and suggest policy
+ddash sandbox init [-i]        Create config (interactive with -i)
+ddash sandbox list             Show current config
+ddash sandbox status           Check sandbox status
+ddash version                  Print version
 ```
 
 ## Requirements

@@ -7,21 +7,23 @@ import (
 
 var Version = "0.1.0"
 
-const usage = `ddash - Sandbox any command on macOS
+const usage = `ddash - Lightweight process sandboxing for macOS
 
-One command to sandbox anything. No Docker. No VMs. No dependencies.
-Uses the built-in macOS sandbox engine (sandbox-exec) at the kernel level.
+One command to sandbox anything. Zero setup, zero overhead.
+Uses the native macOS sandbox engine (sandbox-exec) at the kernel level.
 
 Usage:
   ddash run [flags] -- <command>    Run a command in a sandbox
+  ddash trace -- <command>          Trace access and suggest policy
   ddash sandbox <subcommand>        Manage sandbox configuration
   ddash version                     Print version
 
 Examples:
-  ddash run -- ./untrusted.sh           No network, writes to cwd only
-  ddash run --allow-net -- npm install   Allow network access
-  ddash run --deny-write -- python x.py  Full read-only mode
-  ddash run --profile -- node app.js     Print sandbox profile
+  ddash run -- ./untrusted.sh            No network, writes to cwd only
+  ddash run --allow-net -- npm install    Allow network access
+  ddash run --deny-write -- python x.py   Full read-only mode
+  ddash trace -- python train.py          Trace access, suggest policy
+  ddash sandbox init -i                   Interactive config setup
 
 Flags:
   -h, --help      Show help
@@ -36,6 +38,8 @@ func Execute() error {
 	switch os.Args[1] {
 	case "run":
 		return runCmd()
+	case "trace":
+		return traceCmd()
 	case "version", "-v", "--version":
 		fmt.Printf("ddash version %s\n", Version)
 	case "sandbox":
