@@ -65,11 +65,41 @@ func configPath() string {
 	return filepath.Join(".", ".ddash.json")
 }
 
+const initUsage = `Create a sandbox configuration file
+
+Usage:
+  ddash sandbox init [flags]
+
+Creates a .ddash.json in the current directory that defines the sandbox
+policy for this project. When present, 'ddash run' enforces it automatically.
+
+Without flags, creates a sensible default (no network, read/write to cwd).
+With -i, walks you through each policy decision interactively.
+
+Generated config:
+  {
+    "allow_net":   []        # No network (use ["*"] for all, or list hosts)
+    "allow_read":  ["."]     # Read current directory (system paths always allowed)
+    "allow_write": ["."]     # Write current directory only
+  }
+
+Flags:
+  -i, --interactive   Walk through policy setup step by step
+  -h, --help          Show help
+
+Examples:
+  ddash sandbox init           Create default restrictive config
+  ddash sandbox init -i        Interactive setup with prompts`
+
 func sandboxInit() error {
 	interactive := false
 	for _, arg := range os.Args[3:] {
-		if arg == "-i" || arg == "--interactive" {
+		switch arg {
+		case "-i", "--interactive":
 			interactive = true
+		case "-h", "--help":
+			fmt.Println(initUsage)
+			return nil
 		}
 	}
 
