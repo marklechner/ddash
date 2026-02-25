@@ -15,10 +15,10 @@ macOS ships with a powerful process sandboxing engine, but using it requires wri
 ## Install
 
 ```bash
-brew install ddash
+brew tap marklechner/tap && brew install ddash
 ```
 
-Or from source:
+Or from source (requires Go):
 
 ```bash
 go install github.com/marklechner/ddash@latest

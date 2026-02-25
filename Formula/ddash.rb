@@ -1,8 +1,8 @@
 class Ddash < Formula
   desc "Lightweight process sandboxing for macOS"
   homepage "https://github.com/marklechner/ddash"
-  url "https://github.com/marklechner/ddash/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "1cec5d0211a4c8a4aec218fd049c4a06be9805753cf4e5937e8652bf648fa65e"
+  url "https://github.com/marklechner/ddash/archive/refs/tags/v0.1.1.tar.gz"
+  sha256 "54afa28c36115205fc38b86b9d56af0ff058e73afba98a01294b634c3552eeef"
   license "MIT"
 
   depends_on "go" => :build
