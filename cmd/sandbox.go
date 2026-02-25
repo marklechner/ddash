@@ -8,15 +8,19 @@ import (
 	"time"
 )
 
-const sandboxUsage = `Manage AI sandboxes
+const sandboxUsage = `Manage sandbox configuration
+
+Create and inspect .ddash.json config files that define per-project
+sandbox policies. When present, 'ddash run' applies these policies
+automatically.
 
 Usage:
   ddash sandbox <command> [flags]
 
 Commands:
-  init        Initialize a new sandbox configuration
-  list        List configured sandboxes
-  status      Show sandbox status
+  init        Create a .ddash.json in the current directory
+  list        Show current sandbox configuration
+  status      Check if a sandbox config exists
 
 Flags:
   -h, --help  Show help`
@@ -27,8 +31,9 @@ type SandboxConfig struct {
 	Version   string   `json:"version"`
 	CreatedAt string   `json:"created_at"`
 	Isolation string   `json:"isolation"`
-	AllowNet  []string `json:"allow_net"`
-	AllowRead []string `json:"allow_read"`
+	AllowNet   []string `json:"allow_net"`
+	AllowRead  []string `json:"allow_read"`
+	AllowWrite []string `json:"allow_write"`
 }
 
 func sandboxCmd() error {
@@ -69,8 +74,9 @@ func sandboxInit() error {
 		Version:   Version,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		Isolation: "process",
-		AllowNet:  []string{},
-		AllowRead: []string{"."},
+		AllowNet:   []string{},
+		AllowRead:  []string{"."},
+		AllowWrite: []string{"."},
 	}
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -105,6 +111,13 @@ func sandboxList() error {
 	fmt.Printf("%-12s %s\n", "Name:", cfg.Name)
 	fmt.Printf("%-12s %s\n", "Isolation:", cfg.Isolation)
 	fmt.Printf("%-12s %s\n", "Created:", cfg.CreatedAt)
+	if len(cfg.AllowNet) == 0 {
+		fmt.Printf("%-12s %s\n", "Network:", "denied")
+	} else {
+		fmt.Printf("%-12s %v\n", "Network:", cfg.AllowNet)
+	}
+	fmt.Printf("%-12s %v\n", "Read:", cfg.AllowRead)
+	fmt.Printf("%-12s %v\n", "Write:", cfg.AllowWrite)
 	return nil
 }
 
