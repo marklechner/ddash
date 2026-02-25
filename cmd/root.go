@@ -10,6 +10,7 @@ var Version = "0.1.0"
 const usage = `ddash - Lightweight process sandboxing for macOS
 
 One command to sandbox anything. Zero setup, zero overhead.
+Blocks network, restricts filesystem, scrubs secrets from env.
 Uses the native macOS sandbox engine (sandbox-exec) at the kernel level.
 
 Usage:
@@ -19,11 +20,12 @@ Usage:
   ddash version                     Print version
 
 Examples:
-  ddash run -- ./untrusted.sh            No network, writes to cwd only
-  ddash run --allow-net -- npm install    Allow network access
-  ddash run --deny-write -- python x.py   Full read-only mode
-  ddash trace -- python train.py          Trace access, suggest policy
-  ddash sandbox init -i                   Interactive config setup
+  ddash run -- ./untrusted.sh             No network, env scrubbed, writes to cwd
+  ddash run --allow-net -- npm install     Allow network access
+  ddash run --deny-write -- ./binary       Full read-only mode
+  ddash run --pass-env -- ./needs-creds    Pass env vars through
+  ddash trace -- python train.py           Trace access, suggest policy
+  ddash sandbox init -i                    Interactive config setup
 
 Flags:
   -h, --help      Show help

@@ -6,7 +6,7 @@ Lightweight process sandboxing for macOS. One command, zero setup.
 ddash run -- ./script.sh
 ```
 
-The script runs with **no network access** and **can only write to the current directory**. Everything else is denied at the kernel level.
+The script runs with **no network access**, **no access to your secrets**, and **can only write to the current directory**. Everything else is denied at the kernel level.
 
 ## Why?
 
@@ -27,7 +27,7 @@ go install github.com/marklechner/ddash@latest
 ## Quick start
 
 ```bash
-# Run anything sandboxed — network blocked, writes restricted to cwd
+# Run anything sandboxed — network blocked, writes to cwd only, secrets scrubbed
 ddash run -- python script.py
 
 # Allow network when you need it
@@ -35,6 +35,9 @@ ddash run --allow-net -- npm install
 
 # Full read-only — nothing gets written anywhere
 ddash run --deny-write -- ./suspicious-binary
+
+# Pass env vars through when the command needs credentials
+ddash run --allow-net --pass-env -- ./deploy.sh
 
 # Not sure what a script needs? Trace it first
 ddash trace -- python train.py
@@ -196,9 +199,39 @@ A `.ddash.json` file defines a persistent sandbox policy per project. When prese
 | Network | **Denied** | `--allow-net` or config |
 | Filesystem reads | System paths + cwd | Config |
 | Filesystem writes | cwd + `/tmp` | `--deny-write` for none |
+| Environment variables | **Sensitive vars scrubbed** | `--pass-env` to allow all |
 | Process execution | Allowed | — |
 
 System paths (`/bin`, `/usr`, `/System`, `/Library`, `/opt/homebrew`) are always readable so programs can find interpreters and shared libraries.
+
+### Environment scrubbing
+
+By default, ddash strips environment variables that match known secret patterns before passing them to the sandboxed process. This prevents credential leakage even if a script reads `os.environ`.
+
+Scrubbed patterns include:
+- Cloud credentials: `AWS_*`, `AZURE_*`, `GCP_*`, `GOOGLE_*`
+- API tokens: `GITHUB_TOKEN`, `GH_TOKEN`, `GITLAB_*`, `NPM_TOKEN`, `OPENAI_API*`, `ANTHROPIC_API*`, `HF_TOKEN`
+- Infrastructure: `DATABASE_URL`, `REDIS_URL`, `DOCKER_*`, `SENTRY_*`, `DATADOG_*`
+- Any variable containing `_SECRET`, `_TOKEN`, `_KEY`, `_PASSWORD`, `_CREDENTIAL`, or `_AUTH`
+
+Use `--pass-env` when the sandboxed command legitimately needs credentials (e.g., an API client with network access).
+
+## What ddash protects against (tested)
+
+Every release is verified against these attack scenarios:
+
+| Attack | Result |
+|--------|--------|
+| Script reads `~/.ssh/` private keys | **Blocked** — `Operation not permitted` |
+| Script reads `~/.aws/credentials` | **Blocked** — path outside sandbox |
+| Script opens outbound network connection | **Blocked** — DNS and TCP denied |
+| Script writes to home directory (`~/`) | **Blocked** — write restricted to cwd |
+| Script writes to arbitrary path (`/etc`, `/var`) | **Blocked** — write restricted to cwd |
+| Subprocess tries to escape sandbox (e.g., `cat ~/.ssh/id_ed25519`) | **Blocked** — child processes inherit sandbox |
+| Shell redirect escape (`sh -c 'echo x > ~/file'`) | **Blocked** — sandbox is kernel-level, applies to all children |
+| Script reads `GITHUB_TOKEN` from environment | **Scrubbed** — variable removed before exec |
+| Script reads `AWS_SECRET_ACCESS_KEY` from env | **Scrubbed** — variable removed before exec |
+| `--deny-write` bypass via `/tmp` | **Blocked** — deny-write blocks all paths including `/tmp` |
 
 ## How it works
 
@@ -216,6 +249,15 @@ ddash sandbox list             Show current config
 ddash sandbox status           Check sandbox status
 ddash version                  Print version
 ```
+
+### Flags for `ddash run`
+
+| Flag | Description |
+|------|-------------|
+| `--allow-net` | Allow network access |
+| `--deny-write` | Deny all filesystem writes |
+| `--pass-env` | Pass all environment variables (skip scrubbing) |
+| `--profile` | Print the sandbox profile without running |
 
 ## Requirements
 

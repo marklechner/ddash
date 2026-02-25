@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"syscall"
 )
@@ -15,8 +16,8 @@ Usage:
   ddash run [flags] -- <command> [args...]
 
 Wraps any command with a kernel-level sandbox profile. By default,
-the sandbox denies network access and restricts filesystem writes
-to the current directory.
+the sandbox denies network access, restricts filesystem writes
+to the current directory, and scrubs sensitive environment variables.
 
 If a .ddash.json config exists, its policy is applied automatically.
 
@@ -24,24 +25,70 @@ Default policy:
   Network:    denied
   Reads:      system paths + current directory
   Writes:     current directory + /tmp
+  Env vars:   sensitive variables stripped (tokens, keys, secrets)
   Processes:  allowed
 
 Examples:
-  ddash run -- ./build.sh                Run with no network
+  ddash run -- ./build.sh                Run with no network, env scrubbed
   ddash run -- python train.py           Sandbox a Python script
   ddash run --allow-net -- npm install    Allow network for installs
   ddash run --deny-write -- ./analyze     Full read-only sandbox
-  ddash run --profile -- node app.js     Print profile without running
+  ddash run --pass-env -- ./needs-creds   Pass all env vars through
+  ddash run --profile -- node app.js      Print profile without running
 
 Flags:
   --allow-net       Allow network access (overrides config)
   --deny-write      Deny all filesystem writes (overrides config)
+  --pass-env        Pass all environment variables (disables scrubbing)
   --profile         Print the generated sandbox profile and exit
   -h, --help        Show help`
+
+// Env vars matching these prefixes or exact names are stripped by default.
+// These cover common secret patterns across cloud providers, CI systems,
+// package managers, and developer tools.
+var sensitiveEnvPrefixes = []string{
+	"AWS_",
+	"AZURE_",
+	"GCP_",
+	"GOOGLE_",
+	"GITHUB_TOKEN",
+	"GH_TOKEN",
+	"GITLAB_",
+	"NPM_TOKEN",
+	"PYPI_TOKEN",
+	"DOCKER_",
+	"HOMEBREW_GITHUB_API_TOKEN",
+	"SNYK_TOKEN",
+	"SENTRY_",
+	"DATADOG_",
+	"DD_",
+	"SLACK_TOKEN",
+	"SLACK_WEBHOOK",
+	"TWILIO_",
+	"SENDGRID_",
+	"STRIPE_",
+	"DATABASE_URL",
+	"REDIS_URL",
+	"MONGO",
+	"OPENAI_API",
+	"ANTHROPIC_API",
+	"HF_TOKEN",
+	"HUGGING",
+}
+
+var sensitiveEnvSubstrings = []string{
+	"_SECRET",
+	"_TOKEN",
+	"_KEY",
+	"_PASSWORD",
+	"_CREDENTIAL",
+	"_AUTH",
+}
 
 type runFlags struct {
 	allowNet  bool
 	denyWrite bool
+	passEnv   bool
 	printOnly bool
 }
 
@@ -60,6 +107,8 @@ func runCmd() error {
 			flags.allowNet = true
 		case "--deny-write":
 			flags.denyWrite = true
+		case "--pass-env":
+			flags.passEnv = true
 		case "--profile":
 			flags.printOnly = true
 		case "-h", "--help":
@@ -101,7 +150,7 @@ func runCmd() error {
 		return nil
 	}
 
-	return execSandboxed(profile, os.Args[cmdStart:])
+	return execSandboxed(profile, os.Args[cmdStart:], flags.passEnv)
 }
 
 func loadRunConfig() SandboxConfig {
@@ -221,27 +270,109 @@ func resolvePath(path, cwd string) string {
 	return cwd + "/" + path
 }
 
-func execSandboxed(profile string, args []string) error {
+func scrubEnv() []string {
+	var clean []string
+	var stripped []string
+
+	for _, env := range os.Environ() {
+		name := env
+		if idx := strings.Index(env, "="); idx >= 0 {
+			name = env[:idx]
+		}
+
+		if isSensitive(name) {
+			stripped = append(stripped, name)
+			continue
+		}
+		clean = append(clean, env)
+	}
+
+	if len(stripped) > 0 {
+		fmt.Fprintf(os.Stderr, "ddash: scrubbed %d env var(s): %s\n",
+			len(stripped), strings.Join(stripped, ", "))
+	}
+
+	return clean
+}
+
+func isSensitive(name string) bool {
+	upper := strings.ToUpper(name)
+
+	for _, prefix := range sensitiveEnvPrefixes {
+		if strings.HasPrefix(upper, prefix) {
+			return true
+		}
+	}
+
+	for _, substr := range sensitiveEnvSubstrings {
+		if strings.Contains(upper, substr) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func execSandboxed(profile string, args []string, passEnv bool) error {
 	// Find the command binary
 	binary, err := exec.LookPath(args[0])
 	if err != nil {
 		return fmt.Errorf("command not found: %s", args[0])
 	}
 
-	// Build sandbox-exec command
-	sandboxArgs := []string{"sandbox-exec", "-p", profile, binary}
-	sandboxArgs = append(sandboxArgs, args[1:]...)
-
 	sandboxExec, err := exec.LookPath("sandbox-exec")
 	if err != nil {
 		return fmt.Errorf("sandbox-exec not found — ddash requires macOS sandbox support")
 	}
 
-	fmt.Fprintf(os.Stderr, "ddash: sandboxing %s (network=%s, writes=%s)\n",
-		args[0], networkStatus(profile), writeStatus(profile))
+	// Build environment
+	var env []string
+	if passEnv {
+		env = os.Environ()
+	} else {
+		env = scrubEnv()
+	}
 
-	// Replace current process with sandboxed command
-	return syscall.Exec(sandboxExec, sandboxArgs, os.Environ())
+	envStatus := "scrubbed"
+	if passEnv {
+		envStatus = "passed"
+	}
+
+	fmt.Fprintf(os.Stderr, "ddash: sandboxing %s (network=%s, writes=%s, env=%s)\n",
+		args[0], networkStatus(profile), writeStatus(profile), envStatus)
+
+	// Build sandbox-exec command args
+	cmdArgs := []string{"-p", profile, binary}
+	cmdArgs = append(cmdArgs, args[1:]...)
+
+	// Use exec.Command instead of syscall.Exec for proper stdin/stdout/stderr
+	// piping. syscall.Exec replaces the process which breaks piped input.
+	cmd := exec.Command(sandboxExec, cmdArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = env
+
+	// Forward signals to the child process
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		for sig := range sigCh {
+			if cmd.Process != nil {
+				cmd.Process.Signal(sig)
+			}
+		}
+	}()
+	defer signal.Stop(sigCh)
+
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		return err
+	}
+
+	return nil
 }
 
 func networkStatus(profile string) string {
@@ -253,7 +384,6 @@ func networkStatus(profile string) string {
 
 func writeStatus(profile string) string {
 	if strings.Count(profile, "file-write*") <= 2 {
-		// Only /private/tmp and /dev — effectively no user writes
 		return "restricted"
 	}
 	return "allowed"
